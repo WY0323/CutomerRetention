@@ -1,0 +1,1009 @@
+---
+title: 'Round 2: Retention data and customer intelligence'
+author: "yuan WANG"
+date: "11/14/2019"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load library
+
+```{r}
+library(tidyverse)
+#library(caret)
+#library(randomForest)
+library(pROC)
+library(lightgbm)
+```
+
+## Read data
+
+```{r}
+t117 <- read_csv('Retention-Data-fixed/Retention-train_fixed.csv')
+t120 <- read_csv('Retention-Data-fixed/Retention-score-fixed.csv')
+
+glimpse(t117)
+glimpse(t120) #miss promo and churnIn3Month
+```
+
+
+## Missing and unique values
+
+```{r}
+# train
+t117 %>% 
+  summarise_all( class ) %>%
+  gather("Variable","Type") %>%
+  bind_cols(
+    t117 %>% 
+      summarise_all( ~sum(is.na(.))/n() ) %>%
+      gather("Variable","Missing") %>%
+      select(Missing)
+  ) %>%
+  bind_cols(
+    t117 %>% 
+      summarise_all(n_distinct) %>%
+      gather("Variable","numDistinct") %>%
+      select(numDistinct)
+  ) %>%
+  print(n=100)
+# test
+t120 %>% 
+  summarise_all( class ) %>%
+  gather("Variable","Type") %>%
+  bind_cols(
+    t120 %>% 
+      summarise_all( ~sum(is.na(.))/n() ) %>%
+      gather("Variable","Missing") %>%
+      select(Missing)
+  ) %>%
+  bind_cols(
+    t120 %>% 
+      summarise_all(n_distinct) %>%
+      gather("Variable","numDistinct") %>%
+      select(numDistinct)
+  ) %>%
+  print(n=100)
+
+
+# Nearly all missing: timeSinceLastIsOverData,  minutesVoice, timeSinceLastIsOverVoice
+# Moderate missing: timeSinceLastTechProb, timeSinceLastComplaints
+# slight missing: phonePrice, cashDown, phoneBalance
+```
+
+## Deal with missing values
+
+### timeSinceLastIsOverData
+
+```{r}
+temp_summary <- t117 %>%
+  group_by(timeSinceLastIsOverData,.drop = FALSE) %>%
+  summarise(leave=mean(churnIn3Month),
+            count=n())
+temp_summary %>% print(n=100)
+
+temp_summary %>%
+  ggplot(aes(x=(timeSinceLastIsOverData),y=leave))+
+  geom_bar(stat = "identity")
+
+temp_summary %>% filter(is.na(timeSinceLastIsOverData))
+
+# Removed, too many missing, hard to conclude if there is a pattern
+```
+
+### minutesVoice
+
+```{r}
+temp_summary <- t117 %>%
+  group_by(minutesVoice,.drop = FALSE) %>%
+  summarise(leave=mean(churnIn3Month),
+            count=n())
+temp_summary %>% print(n=100)
+
+temp_summary %>%
+  ggplot(aes(x=as.character(minutesVoice),y=leave))+
+  geom_bar(stat = "identity")
+
+# Clients with missing minutesVoice has a much lower rate of leaving
+# Marked, impute NA with 0,
+# Create a new variable:
+# zerominutesVoice = is.na(minutesVoice)
+
+```
+
+### timeSinceLastIsOverVoice
+
+```{r}
+temp_summary <- t117 %>%
+  group_by(timeSinceLastIsOverVoice,.drop = FALSE) %>%
+  summarise(leave=mean(churnIn3Month),
+            count=n()) %>%
+  mutate(timeSinceLastIsOverVoice=as.integer(timeSinceLastIsOverVoice)) %>%
+  arrange(timeSinceLastIsOverVoice)
+temp_summary %>% print(n=100)
+
+temp_summary %>%
+  ggplot(aes(x=timeSinceLastIsOverVoice,y=leave))+
+  geom_bar(stat = "identity")
+
+temp_summary %>% filter(is.na(timeSinceLastIsOverVoice))
+
+# Removed, too many missing, hard to conclude if there is a pattern
+```
+
+
+## timeSinceLastTechProb
+```{r}
+temp_summary <- t117 %>%
+  group_by(timeSinceLastTechProb,.drop = FALSE) %>%
+  summarise(leave=mean(churnIn3Month),
+            count=n())
+temp_summary %>% print(n=200)
+
+temp_summary %>%
+  ggplot(aes(x=timeSinceLastTechProb,y=leave))+
+  geom_bar(stat = "identity")
+
+temp_summary %>% filter(is.na(timeSinceLastTechProb))
+
+# 0 has a significantly large rate of leaving, NA should be imputed differently 
+# Marked, in feature engineering, create a binary variable, 
+# noTechProb = 1 if timeSinceLastTechProb==0
+
+```
+
+## timeSinceLastComplaints
+```{r}
+temp_summary <- t117 %>%
+  group_by(timeSinceLastComplaints,.drop = FALSE) %>%
+  summarise(leave=mean(churnIn3Month),
+            count=n())
+temp_summary %>% print(n=200)
+
+temp_summary %>%
+  ggplot(aes(x=timeSinceLastComplaints,y=leave))+
+  geom_bar(stat = "identity")
+
+temp_summary %>% filter(is.na(timeSinceLastComplaints))
+
+# 0 has a significantly large rate of leaving, NA should be imputed differently 
+# The peak at 114 is 1, which is not reliable as there is only one client.
+# Marked, in feature engineering, create a binary variable, 
+# noComplaints = 1 if timeSinceLastComplaints==0
+
+```
+
+## phonePrice
+```{r}
+summary(t117$phonePrice)
+summary(t120$phonePrice)
+table(t117$planType)
+table(t120$planType)
+
+t117 %>% 
+  ggplot(aes(x=phonePrice,y=stat(density), 
+             fill=factor(churnIn3Month)))+
+  stat_density(position='identity',alpha=0.5)
+
+
+
+# NA is caused by the fact the clients brought their own phones
+# Marked, leave NA there use model that can deal with NA automatically
+# otherwise consider imputing NA by 0
+```
+
+## cashDown
+```{r}
+summary(t117$cashDown)
+summary(t120$cashDown)
+table(t117$planType)
+table(t120$planType)
+
+t117 %>% 
+  ggplot(aes(x=factor(churnIn3Month),y=cashDown))+
+  geom_boxplot()
+
+t117 %>% 
+  ggplot(aes(x=cashDown,y=stat(density), 
+             fill=factor(churnIn3Month)))+
+  stat_density(position='identity',alpha=0.5)
+
+
+t117 %>%
+  mutate(zeroCashDown= cashDown==0) %>%
+  group_by(zeroCashDown) %>%
+  summarise(leave=mean(churnIn3Month),
+            count=n())
+
+
+# Marked, leave NA there as a seperate category, 
+# use zeroCashDown instead for modeling
+```
+
+## phoneBalance
+```{r}
+summary(t117$phoneBalance)
+summary(t120$phoneBalance)
+summary(t117$cashDown)
+summary(t120$cashDown)
+
+# head(t117$phoneBalance+t117$cashDown)
+# head(t117$phonePrice)
+
+t117 %>% 
+  ggplot(aes(x=factor(churnIn3Month),y=phoneBalance))+
+  geom_boxplot()
+
+t117 %>% 
+  ggplot(aes(x=phoneBalance,y=stat(density), 
+             fill=factor(churnIn3Month)))+
+  stat_density(position='identity',alpha=0.5)
+
+
+t117 %>%
+  mutate(zerophoneBalance = phoneBalance==0) %>%
+  group_by(zerophoneBalance) %>%
+  summarise(leave=mean(churnIn3Month),
+            count=n())
+
+
+# Marked, set NA as 0
+```
+
+
+
+
+
+## Further exploration
+
+### Add familySize
+
+```{r}
+t117 <- t117 %>%
+  group_by(IDfamily) %>%
+  mutate(numFamily=n()) %>%
+  ungroup()
+
+t120 <- t120 %>%
+  group_by(IDfamily) %>%
+  mutate(numFamily=n()) %>%
+  ungroup()
+
+table(t117$numFamily)
+table(t120$numFamily)
+
+#
+temp_summary <- t117 %>%
+  group_by(numFamily,.drop = FALSE) %>%
+  summarise(leave=mean(churnIn3Month),
+            count=n()) %>%
+  mutate(prop=count/sum(count))
+temp_summary %>% print(n=200)
+
+# For two clients in the same family, will they quit together?
+# No 
+t117 %>%
+  filter(numFamily==2) %>%
+  group_by(IDfamily) %>%
+  summarise(leave=mean(churnIn3Month)) %>%
+  group_by(leave) %>%
+  summarise(count=n())
+
+
+# Marked, in feature engineering, make it a count variable
+```
+
+### nbAdultAvg               
+
+```{r}
+summary(t117$nbAdultAvg)
+summary(t120$nbAdultAvg)
+
+
+t117 %>% 
+  ggplot(aes(x=factor(churnIn3Month),y=nbAdultAvg))+
+  geom_boxplot()
+
+t117 %>% 
+  ggplot(aes(x=nbAdultAvg,y=stat(density), 
+             fill=factor(churnIn3Month)))+
+  stat_density(position='identity',alpha=0.5)
+
+# Marked, in feature engineering, make it a numerical variable
+```
+
+
+### chrono                       
+
+```{r}
+summary(t117$chrono)
+summary(t120$chrono)
+
+t117 %>% 
+  ggplot(aes(x=factor(churnIn3Month),y=chrono))+
+  geom_boxplot()
+
+t117 %>% 
+  ggplot(aes(x=chrono,y=stat(density), 
+             fill=factor(churnIn3Month)))+
+  stat_density(position='identity',alpha=0.5)
+
+# Marked, in feature engineering, make it a numerical variable
+```
+
+
+### age                       
+
+```{r}
+summary(t117$age)
+summary(t120$age)
+
+t117 %>% 
+  ggplot(aes(x=factor(churnIn3Month),y=age))+
+  geom_boxplot()
+
+t117 %>% 
+  ggplot(aes(x=age,y=stat(density), 
+             fill=factor(churnIn3Month)))+
+  stat_density(position='identity',alpha=0.5)
+
+# Marked, in feature engineering, make it a count variable
+```
+
+
+### gender                   
+
+```{r}
+table(t117$gender)
+table(t120$gender)
+
+temp_summary <- t117 %>%
+  group_by(gender,.drop = FALSE) %>%
+  summarise(leave=mean(churnIn3Month),
+            count=n())
+temp_summary %>% print(n=200)
+
+
+# Marked, in feature engineering, create a factor.
+# may be dropped as proportions are close
+```
+
+### isWorkPhone
+
+```{r}
+table(t117$isWorkPhone)
+table(t120$isWorkPhone)
+
+temp_summary <- t117 %>%
+  group_by(isWorkPhone,.drop = FALSE) %>%
+  summarise(leave=mean(churnIn3Month),
+            count=n())
+temp_summary %>% print(n=200)
+
+
+# Marked, in feature engineering, create a factor.
+```
+
+
+### planType
+
+```{r}
+table(t117$planType)
+table(t120$planType)
+
+temp_summary <- t117 %>%
+  group_by(planType,.drop = FALSE) %>%
+  summarise(leave=mean(churnIn3Month),
+            count=n())
+temp_summary %>% print(n=200)
+
+
+# Marked, in feature engineering, create a factor.
+```
+
+
+### data                     
+
+```{r}
+summary(t117$data)
+summary(t120$data)
+
+temp_summary <- t117 %>%
+  group_by(data,.drop = FALSE) %>%
+  summarise(leave=mean(churnIn3Month),
+            count=n())
+temp_summary %>% print(n=200)
+
+temp_summary %>%
+  ggplot(aes(x=data,y=leave))+
+  geom_bar(stat = "identity")
+
+
+# Marked, in feature engineering, make it a numerical variable
+```
+
+
+### dataAvgConsumption                     
+
+```{r}
+summary(t117$dataAvgConsumption)
+summary(t120$dataAvgConsumption)
+
+t117 %>% 
+  ggplot(aes(x=factor(churnIn3Month),y=dataAvgConsumption))+
+  geom_boxplot()
+
+t117 %>% 
+  ggplot(aes(x=dataAvgConsumption,y=stat(density), 
+             fill=factor(churnIn3Month)))+
+  stat_density(position='identity',alpha=0.5)
+
+# Marked, in feature engineering, make it a numerical variable
+```
+
+
+
+### nbrIsOverData                     
+
+```{r}
+summary(t117$nbrIsOverData)
+summary(t120$nbrIsOverData)
+
+temp_summary <- t117 %>%
+  group_by(nbrIsOverData,.drop = FALSE) %>%
+  summarise(leave=mean(churnIn3Month),
+            count=n())
+temp_summary %>% print(n=200)
+
+temp_summary %>%
+  ggplot(aes(x=nbrIsOverData,y=leave))+
+  geom_bar(stat = "identity")
+
+# Marked, in feature engineering, make a binary variable 
+# IsOverData = 1 if nbrIsOverData>0
+```
+
+
+
+### unlimitedVoice
+
+```{r}
+table(t117$unlimitedVoice)
+table(t120$unlimitedVoice)
+
+temp_summary <- t117 %>%
+  group_by(unlimitedVoice,.drop = FALSE) %>%
+  summarise(leave=mean(churnIn3Month),
+            count=n())
+temp_summary %>% print(n=200)
+
+
+# Marked, in feature engineering, create a factor.
+```
+
+### voiceAvgConsumption                 
+
+```{r}
+summary(t117$voiceAvgConsumption)
+summary(t120$voiceAvgConsumption)
+
+t117 %>% 
+  ggplot(aes(x=factor(churnIn3Month),y=voiceAvgConsumption))+
+  geom_boxplot()
+
+t117 %>% 
+  ggplot(aes(x=voiceAvgConsumption,y=stat(density), 
+             fill=factor(churnIn3Month)))+
+  stat_density(position='identity',alpha=0.5)
+
+# Marked, in feature engineering, make it a numerical variable
+```
+
+
+### nbrIsOverVoice
+
+```{r}
+table(t117$nbrIsOverVoice)
+table(t120$nbrIsOverVoice)
+
+temp_summary <- t117 %>%
+  group_by(nbrIsOverVoice,.drop = FALSE) %>%
+  summarise(leave=mean(churnIn3Month),
+            count=n())
+temp_summary %>% print(n=200)
+
+temp_summary %>%
+  ggplot(aes(x=nbrIsOverVoice,y=leave))+
+  geom_bar(stat = "identity")
+
+# Removed. Too rare non-zero cases.
+```
+
+
+### unlimitedText
+
+```{r}
+table(t117$unlimitedText)
+table(t120$unlimitedText)
+
+
+# Removed. One category dominante the others.
+```
+
+### textoAvgConsumption                 
+
+```{r}
+summary(t117$textoAvgConsumption)
+summary(t120$textoAvgConsumption)
+
+t117 %>% 
+  ggplot(aes(x=factor(churnIn3Month),y=textoAvgConsumption))+
+  geom_boxplot()
+
+t117 %>% 
+  ggplot(aes(x=textoAvgConsumption,y=stat(density), 
+             fill=factor(churnIn3Month)))+
+  stat_density(position='identity',alpha=0.5)
+
+# Marked, in feature engineering, make it a numerical variable
+```
+
+### baseMonthlyRateForPlan
+
+```{r}
+table(t117$baseMonthlyRateForPlan)
+table(t120$baseMonthlyRateForPlan)
+
+temp_summary <- t117 %>%
+  group_by(baseMonthlyRateForPlan,.drop = FALSE) %>%
+  summarise(leave=mean(churnIn3Month),
+            count=n())
+temp_summary %>% print(n=200)
+
+temp_summary %>%
+  ggplot(aes(x=baseMonthlyRateForPlan,y=leave))+
+  geom_bar(stat = "identity")
+
+# Marked, in feature engineering, make it a numerical variable
+```
+
+### baseMonthlyRateForPhone
+
+```{r}
+summary(t117$baseMonthlyRateForPhone)
+summary(t120$baseMonthlyRateForPhone)
+
+t117 %>% 
+  ggplot(aes(x=factor(churnIn3Month),y=baseMonthlyRateForPhone))+
+  geom_boxplot()
+
+t117 %>% 
+  ggplot(aes(x=baseMonthlyRateForPhone,y=stat(density), 
+             fill=factor(churnIn3Month)))+
+  stat_density(position='identity',alpha=0.5)
+
+# Marked, in feature engineering, make it a numerical variable
+```
+
+
+### nbrTechnicalProblems
+
+```{r}
+table(t117$nbrTechnicalProblems)
+table(t120$nbrTechnicalProblems)
+
+temp_summary <- t117 %>%
+  group_by(nbrTechnicalProblems,.drop = FALSE) %>%
+  summarise(leave=mean(churnIn3Month),
+            count=n())
+temp_summary %>% print(n=200)
+
+temp_summary %>%
+  ggplot(aes(x=nbrTechnicalProblems,y=leave))+
+  geom_bar(stat = "identity")
+
+# Marked, in feature engineering, make it a numerical variable
+```
+
+
+### nbrComplaints
+
+```{r}
+table(t117$nbrComplaints)
+table(t120$nbrComplaints)
+
+temp_summary <- t117 %>%
+  group_by(nbrComplaints,.drop = FALSE) %>%
+  summarise(leave=mean(churnIn3Month),
+            count=n())
+temp_summary %>% print(n=200)
+
+temp_summary %>%
+  ggplot(aes(x=nbrComplaints,y=leave))+
+  geom_bar(stat = "identity")
+
+# Marked, in feature engineering, make it a numerical variable
+```
+
+
+
+### promo
+
+```{r}
+table(t117$promo)
+
+temp_summary <- t117 %>%
+  group_by(promo,.drop = FALSE) %>%
+  summarise(leave=mean(churnIn3Month),
+            count=n())
+temp_summary %>% print(n=200)
+
+# Marked
+```
+
+
+### lifeTime
+
+```{r}
+summary(t117$lifeTime)
+summary(t120$lifeTime)
+
+t117 %>% 
+  ggplot(aes(x=factor(churnIn3Month),y=lifeTime))+
+  geom_boxplot()
+
+t117 %>% 
+  ggplot(aes(x=lifeTime,y=stat(density), 
+             fill=factor(churnIn3Month)))+
+  stat_density(position='identity',alpha=0.5)
+
+# Marked, in feature engineering, make it a numerical variable
+```
+
+
+### promo
+
+```{r}
+table(t117$churnIn3Month)
+table(t117$churnIn3Month)/nrow(t117)
+
+# Marked
+```
+
+
+## Feature engineering
+
+```{r}
+t117_preprocessed <- t117 %>%
+  select(-timeSinceLastIsOverData,
+         -timeSinceLastIsOverVoice,
+         -nbrIsOverVoice,
+         -unlimitedText) %>%
+  group_by(IDfamily) %>%
+  mutate(numFamily=n()) %>%
+  ungroup() %>%
+  mutate(noTechProb= addNA(factor(timeSinceLastTechProb==0)),
+         noComplaints = addNA(factor(timeSinceLastComplaints==0)),
+         zeroCashDown= addNA(factor(cashDown==0)),
+         IsOverData = nbrIsOverData>0,
+         zerominutesVoice = is.na(minutesVoice) ) %>%
+  select(-timeSinceLastTechProb,
+         -timeSinceLastComplaints,
+         -cashDown,
+         -nbrIsOverData,
+         -minutesVoice) %>%
+  mutate(phonePrice = replace_na(phonePrice,0),
+         phoneBalance = replace_na(phoneBalance,0),
+         gender = factor(gender),
+         isWorkPhone = factor(isWorkPhone),
+         planType = factor(planType),
+         churnIn3Month=factor(churnIn3Month)) %>%
+  select(-ID,
+         -IDfamily)
+
+
+
+t120_preprocessed <- t120 %>%
+  select(-timeSinceLastIsOverData,
+         -timeSinceLastIsOverVoice,
+         -nbrIsOverVoice,
+         -unlimitedText) %>%
+  group_by(IDfamily) %>%
+  mutate(numFamily=n()) %>%
+  ungroup() %>%
+  mutate(noTechProb= addNA(factor(timeSinceLastTechProb==0)),
+         noComplaints = addNA(factor(timeSinceLastComplaints==0)),
+         zeroCashDown= addNA(factor(cashDown==0)),
+         IsOverData = nbrIsOverData>0,
+         zerominutesVoice = is.na(minutesVoice) ) %>%
+  select(-timeSinceLastTechProb,
+         -timeSinceLastComplaints,
+         -cashDown,
+         -nbrIsOverData,
+         -minutesVoice) %>%
+  mutate(phonePrice = replace_na(phonePrice,0),
+         phoneBalance = replace_na(phoneBalance,0),
+         gender = factor(gender),
+         isWorkPhone = factor(isWorkPhone),
+         planType = factor(planType)) %>%
+  select(-ID,
+         -IDfamily)
+
+```
+
+```{r}
+# Check
+# Summary of the preprocessed data
+t117_preprocessed %>% 
+  summarise_all( class ) %>%
+  gather("Variable","Type") %>%
+  bind_cols(
+    t117_preprocessed %>% 
+      summarise_all( ~sum(is.na(.))/n() ) %>%
+      gather("Variable","Missing") %>%
+      select(Missing)
+  ) %>%
+  bind_cols(
+    t117_preprocessed %>% 
+      summarise_all(n_distinct) %>%
+      gather("Variable","numDistinct") %>%
+      select(numDistinct)
+  ) %>%
+  print(n=100)
+
+
+t120_preprocessed %>% 
+  summarise_all( class ) %>%
+  gather("Variable","Type") %>%
+  bind_cols(
+    t120_preprocessed %>% 
+      summarise_all( ~sum(is.na(.))/n() ) %>%
+      gather("Variable","Missing") %>%
+      select(Missing)
+  ) %>%
+  bind_cols(
+    t120_preprocessed %>% 
+      summarise_all(n_distinct) %>%
+      gather("Variable","numDistinct") %>%
+      select(numDistinct)
+  ) %>%
+  print(n=100)
+```
+
+
+## Start modeling
+
+### Create 5-fold cross validation
+
+```{r}
+set.seed(65234897)
+cvFold <- sample(1:5,nrow(t117_preprocessed), replace = TRUE)
+```
+
+### logistic regression
+```{r} 
+# Logistic regression using cross-validation
+# Used as baseline method
+logistic1_fit <- vector("list",5)
+auc_logistic <- numeric(5)
+for(k in 1:5){
+  cat(k,",")
+  trainRDCI <- t117_preprocessed[cvFold!=k,]
+  validRDCI <- t117_preprocessed[cvFold==k,]
+  logistic1_fit[[k]] <- glm(churnIn3Month~.,
+                              data=trainRDCI,
+                              family=binomial())
+  #summary(logistic1_fit[[k]])
+  pred_logistic1 <- predict(logistic1_fit[[k]],
+                                  newdata=validRDCI, 
+                                  type="response")
+  
+  auc_logistic[k] <- roc(validRDCI$churnIn3Month,pred_logistic1,col="blue")$auc
+}
+auc_logistic
+```
+
+### lightgbm
+```{r}
+
+#lgb.unloader(wipe=TRUE)
+set.seed(123)
+catSet <- c("promo", 
+            "gender", "isWorkPhone", 
+            "planType", "noTechProb", 
+            "noComplaints", "zeroCashDown")
+
+
+
+lgb_list <- vector("list",5)
+auc_lgb <- numeric(5)
+params = list(objective = "binary",
+              metric = "auc",
+              num_iterations=1000,
+              learning_rate=0.05,
+              num_leaves= 55,
+              min_child_samples= 500,
+              max_bin= 55,
+              max_depth=3,
+              subsample= 0.8,  
+              subsample_freq= 1,
+              colsample_bytree= 0.8,  
+              min_child_weight= 0,
+              min_split_gain= 0.00001,
+              #  lambda_l2=0.1,
+              boosting="gbdt") #
+
+for(k in 1:5){
+  cat(k,",")
+  trainRDCI <- t117_preprocessed[cvFold!=k,]  %>%
+    mutate_if(is.factor, ~as.integer(.)) %>%
+    select(-churnIn3Month) %>%
+    mutate(promo=as.integer(promo))%>%
+    as.matrix()
+  
+  validRDCI <- t117_preprocessed[cvFold==k,] %>%
+    mutate_if(is.factor, ~as.integer(.)) %>%
+    select(-churnIn3Month) %>%
+    mutate(promo=as.integer(promo)) %>%
+    as.matrix()
+  
+  trainLabel <- as.numeric(t117_preprocessed[cvFold!=k,]$churnIn3Month)-1
+  validLabel <- as.numeric(t117_preprocessed[cvFold==k,]$churnIn3Month)-1
+  
+  # Creating the 'train' for modeling
+  trainS = lgb.Dataset(data = trainRDCI,
+                       label = trainLabel,
+                       categorical_feature = catSet)
+  
+  # Creating the 'validation' for modeling
+  valS = lgb.Dataset(data = validRDCI,
+                     label = validLabel, 
+                     categorical_feature = catSet)
+  invisible(gc())
+  
+  # train lgb
+  fit_lgb <- lgb.train(params, trainS, valids = list(validation = valS), 
+                       nthread = 4,
+                       verbose= -1, record=TRUE,
+                       eval_freq = 10, early_stopping_rounds = 50)
+  fit_lgb$best_iter <- which.max(unlist(fit_lgb$record_evals$validation$auc$eval))
+  #fit_lgb$best_iter 
+  auc_lgb[k] <- max(unlist(fit_lgb$record_evals$validation$auc$eval))
+  
+  # Feature importance
+  # impBooster <- lgb.importance(fit_lgb, percentage = TRUE)
+  # impBooster[,2:4] <- round(impBooster[,2:4],5)
+  # impBooster
+  
+  
+  lgb_list[[k]] <- fit_lgb
+}
+
+auc_lgb
+```
+
+### Comparison between logistic regression and lightgbm
+
+```{r}
+# Prefer lgb
+cbind(auc_logistic,auc_lgb)
+```
+
+
+### Predict uplift 
+```{r}
+testRDCI_nopromo <- t120_preprocessed %>%
+  mutate_if(is.factor, ~as.integer(.)) %>%
+  # select(-churnIn3Month) %>%
+  mutate(promo=as.integer(0))%>%
+  as.matrix()
+testRDCI_nopromo <- testRDCI_nopromo[,c(1:17,25,18:24)] #reorder to match the training order
+
+testRDCI_promo <- t120_preprocessed %>%
+  mutate_if(is.factor, ~as.integer(.)) %>%
+  # select(-churnIn3Month) %>%
+  mutate(promo=as.integer(1))%>%
+  as.matrix()
+testRDCI_promo <- testRDCI_promo[,c(1:17,25,18:24)]
+
+preds_nopromo <- 0
+preds_promo <- 0
+for(k in 1:5){
+  cat(k,"")
+  preds_nopromo <- preds_nopromo + predict(lgb_list[[k]], 
+                                         data = testRDCI_nopromo, 
+                                         n = lgb_list[[k]]$best_iter )
+  preds_promo <- preds_promo +predict(lgb_list[[k]], 
+                                        data = testRDCI_promo, 
+                                        n = lgb_list[[k]]$best_iter )
+}
+preds_nopromo <- preds_nopromo/5
+preds_promo <- preds_promo/5
+
+# Since churnIn3Month = 1 if Client has left in a 3-month window
+# the we compute uplift using 
+uplift <- preds_nopromo - preds_promo
+summary(uplift)
+plot(preds_nopromo,uplift)
+
+
+```
+
+### Expected profit for each client in the test set
+```{r}
+monthfee <- t120_preprocessed$baseMonthlyRateForPlan
+
+profit_nopromo <- 0
+for(k in 1:7){
+  profit_nopromo <- profit_nopromo + dnbinom(k, 1, preds_nopromo)*monthfee*3*k/2
+}
+profit_nopromo <- (1-pnbinom(7, 1, preds_nopromo)) * monthfee *3 * 8/2
+summary(profit_nopromo)
+
+profit_promo <- 0
+for(k in 1:7){
+  profit_promo <- profit_promo + dnbinom(k, 1, preds_promo)*monthfee*3*k/2
+}
+profit_promo <- (1-pnbinom(7, 1, preds_promo)) * monthfee *3 * 8/2
+summary(profit_promo)
+
+
+# Compute profit_uplift
+profit_uplift <- profit_promo-profit_nopromo
+summary(profit_uplift)
+
+profit_uplift_tab <- tibble(ID=t120$ID, IDfamily=t120$IDfamily, profit_uplift=profit_uplift)
+write_csv(profit_uplift_tab, path = "profit_uplift_tab.csv")
+
+# Compute profit_uplift for each familyID
+profit_uplift_tab_family <- profit_uplift_tab %>%
+  group_by(IDfamily) %>%
+  summarize(average_profit_uplift= mean(profit_uplift),
+            numFamily=n()) %>%
+  arrange(desc(average_profit_uplift)) %>%
+  mutate(cumNum=cumsum(numFamily))
+
+write_csv(profit_uplift_tab_family, path = "profit_uplift_tab_family.csv")
+```
+
+### Use the expected profit uplift to find desired clients
+
+```{r}
+# Find the last family that has average_profit_uplift>10
+lastIdx <- which(profit_uplift_tab_family$average_profit_uplift>10)
+lastIdx <- lastIdx[length(lastIdx)]
+lastIdx # 332762 families
+profit_uplift_tab_family$cumNum[lastIdx] #need 373319 clients
+
+# Compute the overall profit
+overall_profit_uplift <- function(Nfamily){
+  with(profit_uplift_tab_family[1:Nfamily,],
+     sum((average_profit_uplift-10)*numFamily)- 10000* (cumNum[Nfamily]%/%5000) )
+}
+
+
+
+
+xnum <- c(seq(1000,325000,1000), 332762, seq(350000,500000,2500))
+ynum <- sapply(xnum,overall_profit_uplift)
+plot(xnum, ynum)
+
+xnum[which.max(ynum)] #307000
+
+profit_uplift_tab_family$cumNum[307000] #344415
+10000* (profit_uplift_tab_family$cumNum[307000]%/%5000)
+profit_uplift_tab_family$average_profit_uplift[307000]
+
+# Output the first 307000 IDfamily 
+output_IDfamily <- profit_uplift_tab_family[1:xnum[which.max(ynum)],] %>% select(IDfamily)
+output_IDfamily
+
+
+write_csv(output_IDfamily,"output_IDfamily1.csv") 
+
+```
+
+

@@ -1,0 +1,366 @@
+---
+title: 'Customer segmentation Using Clustering Analysis'
+author: "yuan wang"
+date: "11/28/2019"
+header-includes:
+   - \usepackage{float}
+output: 
+  pdf_document: 
+    number_sections: yes
+urlcolor: blue
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+# Introduction
+
+This project report describes how clustering analysis is used to perform 
+customer segmentation in the given retention data, 
+which divides customers into groups of similar characteristics.
+The business goal is to identify the low-loyalty and high-loyalty customers for *Telc* and 
+their associated characteristics.
+In the end,  some actionable suggestions are given based on the discoveries from the clusters.
+
+# Data Preprocess
+
+The same data preprocess steps as Round 2 was performed. 
+The tables below show the summary of the categorical variables and 
+the numerical variables respectively for the **training** data.
+For performing the clustering analysis, 
+we would use all these variables except `ID`, `IDfamily`, `promo`, and `churnIn3Month`.
+The variables `promo` and `churnIn3Month` were not used because 
+they were neither demographics or behaviors that could be known in advance for a new customer.
+But once we obtained the clusters of customers,
+we could use the information provided by `promo` and `churnIn3Month` to investigate
+how the clusters were associated with the retention.
+
+```{r, include=FALSE}
+# Load library
+library(knitr)
+library(kableExtra)
+library(tidyverse)
+library(cluster)
+
+# Read data
+t117_type <- cols(
+  ID = col_integer(),
+  IDfamily = col_integer(),
+  nbAdultAvg = col_double(),
+  chrono = col_double(),
+  age = col_double(),
+  gender = col_character(),
+  isWorkPhone = col_double(),
+  planType = col_character(),
+  data = col_double(),
+  dataAvgConsumption = col_double(),
+  nbrIsOverData = col_double(),
+  timeSinceLastIsOverData = col_double(),
+  unlimitedVoice = col_double(),
+  minutesVoice = col_double(),
+  voiceAvgConsumption = col_double(),
+  nbrIsOverVoice = col_double(),
+  timeSinceLastIsOverVoice = col_character(),
+  unlimitedText = col_double(),
+  textoAvgConsumption = col_double(),
+  phonePrice = col_double(),
+  cashDown = col_double(),
+  phoneBalance = col_double(),
+  baseMonthlyRateForPlan = col_double(),
+  baseMonthlyRateForPhone = col_double(),
+  timeSinceLastTechProb = col_double(),
+  nbrTechnicalProblems = col_double(),
+  timeSinceLastComplaints = col_double(),
+  nbrComplaints = col_double(),
+  promo = col_double(),
+  lifeTime = col_double(),
+  churnIn3Month = col_double()
+)
+
+t117 <- read_csv('Retention-train_fixed.csv',
+                 col_types = t117_type)
+
+#glimpse(t117)
+```
+
+
+```{r}
+# Data cleaning/ feature engineering
+t117_preprocessed <- t117 %>%
+  select(-timeSinceLastIsOverData,
+         -timeSinceLastIsOverVoice,
+         -nbrIsOverVoice,
+         -unlimitedText) %>%
+  group_by(IDfamily) %>%
+  mutate(numFamily=n()) %>%
+  ungroup() %>%
+  mutate(#noTimeTechProb= addNA(factor(timeSinceLastTechProb==0)),
+         #noTimeComplaints = addNA(factor(timeSinceLastComplaints==0)),
+         # zerominutesVoice = factor(is.na(minutesVoice)),
+         # zeroCashDown= addNA(factor(cashDown==0)),
+         IsOverData = factor(nbrIsOverData>0) ) %>%
+  select(-timeSinceLastTechProb,
+         -timeSinceLastComplaints,
+         -cashDown,
+         -nbrIsOverData,
+         -minutesVoice) %>%
+  mutate(phonePrice = replace_na(phonePrice,0),
+         phoneBalance = replace_na(phoneBalance,0),
+         gender = factor(gender),
+         isWorkPhone = factor(isWorkPhone),
+         planType = factor(planType),
+         unlimitedVoice = factor(unlimitedVoice),
+         churnIn3Month=factor(churnIn3Month),
+         promo=factor(promo) ) 
+```
+
+
+
+```{r}
+# Summary of the categorical variables of the preprocessed data
+desc_category <- t117_preprocessed %>% 
+  select_if(is.factor) %>%
+  summarise_all( ~sum(is.na(.))/n() ) %>%
+  gather("Variable","Missing")%>% 
+  bind_cols(
+    t117_preprocessed %>%
+      select_if(is.factor) %>%
+      summarise_all(~paste(sort(unique(.)),collapse = ", ")) %>%
+      gather("Variable","Categories") %>%
+      select(Categories)
+  ) %>%
+  bind_cols(
+    t117_preprocessed %>%
+      select_if(is.factor) %>%
+      summarise_all(n_distinct) %>%
+      gather("Variable","numDistinct") %>%
+      select(numDistinct)
+  ) 
+
+kable(desc_category[,-2],digits=2, 
+      format = "latex", booktabs = T,
+      caption = "Summary of Processed Categorical Variables",
+      linesep = "")%>%
+  kable_styling(font_size = 6, latex_options = c("striped","hold_position") )
+```
+
+```{r}
+# Summary of the numerical variables of the preprocessed data
+desc_num <- t117_preprocessed %>% 
+  select_if(~!is.factor(.)) %>%
+  summarise_all( ~sum(is.na(.))/n() ) %>%
+  gather("Variable","Missing") %>% 
+  bind_cols(
+    t117_preprocessed %>%
+      select_if(~!is.factor(.)) %>%
+      summarise_all(min) %>%
+      gather("Variable","Min") %>%
+      select(Min)
+  ) %>% 
+  bind_cols(
+    t117_preprocessed %>%
+      select_if(~!is.factor(.)) %>%
+      summarise_all(median) %>%
+      gather("Variable","Median") %>%
+      select(Median)
+  ) %>% 
+  bind_cols(
+    t117_preprocessed %>%
+      select_if(~!is.factor(.)) %>%
+      summarise_all(mean) %>%
+      gather("Variable","Mean") %>%
+      select(Mean)
+  ) %>% 
+  bind_cols(
+    t117_preprocessed %>%
+      select_if(~!is.factor(.)) %>%
+      summarise_all(max) %>%
+      gather("Variable","Max") %>%
+      select(Max)
+  ) %>% 
+  bind_cols(
+    t117_preprocessed %>%
+      select_if(~!is.factor(.)) %>%
+      summarise_all(sd) %>%
+      gather("Variable","SD") %>%
+      select(SD)
+  ) %>%
+  bind_cols(
+    t117_preprocessed %>%
+      select_if(~!is.factor(.)) %>%
+      summarise_all(n_distinct) %>%
+      gather("Variable","numDistinct") %>%
+      select(numDistinct)
+  )
+
+kable(desc_num[,-2],digits=2, format = "latex", booktabs = T,
+      caption = "Summary of Processed Numerical Variables",
+      linesep = "") %>%
+  kable_styling(font_size = 6, latex_options = c("striped","hold_position"))
+```
+
+
+# Clustering analysis
+
+## Partitioning around medoids
+
+The clustering method of partitioning around medoids (PAM) was used, 
+based on the dissimilarity measure of Gower distance.
+Gower distance adapts a particular standardized distance depending on
+the type of a variable, 
+so it is amenable for both categorical and numerical variables.
+PAM allows the usage of a custom distance metric.
+Its algorithm is identical to the K-means algorithm except that
+k-means defines the cluster center as the average location 
+while the cluster center (medoid) of PAM is one of the data points.
+
+Since the computation cost for both time and memory are quadratic of the sample size,
+only a random sample of 10000 (1.2%) customers was used for the clustering analysis.
+
+```{r}
+set.seed(113)
+row_use <- sample(1:nrow(t117_preprocessed),10000)
+t117_preprocessed_sub <- t117_preprocessed %>%
+  dplyr::slice(row_use)
+
+#t117_preprocessed_sub
+gower_dist <- daisy(t117_preprocessed_sub[,-c(1,2,20,22)],
+                    metric = "gower")
+
+# (I = interval, N = nominal)
+#summary(gower_dist)
+gower_mat <- as.matrix(gower_dist)
+```
+
+## Number of clusters
+
+PAM is a non-hierarchical clustering algorithm, which requires one
+to determine the number of clusters in advance.
+The [silhouette width](https://en.wikipedia.org/wiki/Silhouette_(clustering))
+is one of the validation metrics that can 
+help us choose the reasonable number of clusters.
+
+To make the interpretation of clusters manageable for our business objective,
+the maximum number of clusters was restricted to 5.
+We conduct the PAM by setting the number of clusters from 2 to 5,
+and chose the number of clusters with the maximum average silhouette width.
+As indicated by the figure below, three clusters should be chosen.
+
+```{r, fig.align='center', fig.width=4, fig.height=3, fig.pos='!ht'}
+#Calculate silhouette width for each k
+K <- 5
+sil_width <- numeric(K)
+sil_width[1] <- NA
+
+for(i in 2:K){
+  pam_fit <- pam(gower_dist,
+                 diss = TRUE,
+                 k = i)
+  sil_width[i] <- pam_fit$silinfo$avg.width
+}
+
+# Visualize the result
+plot(1:K, sil_width,
+     xlab = "Number of Clusters",
+     ylab = "Silhouette Average Width",
+     cex.lab=0.8, cex.axis=0.8)
+lines(1:K, sil_width)
+```
+
+## Interpretation of clusters 
+
+Descriptive statistics of each cluster 
+were used to aid interpretations, which are shown in Table 3 and Table 4.
+Below summarizes the pronounced characteristics for each cluster.
+
+1. Cluster 1: 42% of the customers; Rate of leaving is medium (5.1%); **All are females**; Most rent phones (91.2%).
+2. Cluster 2: 19% of the customers. Rate of leaving is highest (12.4%); 39.4% are females; No customers used phones for working; Rarely rent phones (0.6%); Relatively lower rate of having unlimited voice (94.2% vs 97.9% and 98%); Relatively newer clients (median arrival at month 108 vs 99 and 98); Relatively lower average data consumption (1.71 vs 1.92 and 1.91); Relatively lower lifetime (10 vs 19 and 20); Relatively lower monthly SMS numbers (265 vs 333 and 337); Relatively longer monthly voice calls (86.9 vs 76.5 and 80.0).
+3. Cluster 3: 39% of the customers. Rate of leaving is lowest (4.5%); **All are males**; All rent phones.
+
+Notice that the variables `promo` and `churnIn3Month` 
+were not used to identify the clusters,
+but the resulted cluster 2 had a far larger leaving rate compared to the other two.
+
+```{r}
+k <- 3 #choose k by Silhouette Average Width
+pam_fit <- pam(gower_dist, diss = TRUE, k)
+```
+
+```{r catCluster}
+cat_prop <- function(x){
+  tmp1 <- round(table(x)/length(x)*100,1)
+  paste(paste(names(tmp1),":",tmp1,"%",sep = ""), collapse = ", ")
+}
+
+cluster_cat_summary <- t117_preprocessed_sub %>% 
+  select_if(is.factor) %>%
+  mutate(cluster = pam_fit$clustering) %>%
+  group_by(cluster) %>%
+  summarise(count=n()) %>%
+  left_join(
+    {t117_preprocessed_sub %>% 
+        select_if(is.factor) %>%
+        mutate(cluster = pam_fit$clustering) %>%
+        group_by(cluster) %>%
+        summarise_all(~cat_prop(.))
+    },by="cluster"
+  ) %>%
+  gather(Variable,value,-cluster) %>%
+  spread(cluster,value)
+
+cluster_cat_summary <- cluster_cat_summary[c(2,1,7,3:6,8),] %>%
+  rename(Cluster1=`1`, Cluster2=`2`, Cluster3=`3`)
+
+kable(cluster_cat_summary,digits=2, format = "latex", booktabs = T,
+      caption = "Proportions of Categorical Variables for each Cluster",
+      linesep = "") %>%
+  kable_styling(font_size = 6, latex_options = c("striped","hold_position"))
+```
+
+```{r numCluster}
+cluster_num_summary <- t117_preprocessed_sub %>% 
+  select_if(~!is.factor(.)) %>%
+  select(-ID,-IDfamily) %>%
+  mutate(cluster = pam_fit$clustering) %>%
+  group_by(cluster) %>%
+  summarise(count=n()) %>%
+  left_join(
+    {t117_preprocessed_sub %>% 
+        select_if(~!is.factor(.)) %>%
+        select(-ID,-IDfamily) %>%
+        mutate(cluster = pam_fit$clustering) %>%
+        group_by(cluster) %>%
+        summarise_all(median)
+    },by="cluster"
+  ) %>%
+  gather(Variable,value,-cluster) %>%
+  spread(cluster,value)
+
+cluster_num_summary <- cluster_num_summary[c(5,1:4,6:16),] %>%
+  rename(Cluster1=`1`, Cluster2=`2`, Cluster3=`3`)
+
+
+kable(cluster_num_summary[-1,],digits=2, format = "latex", booktabs = T,
+      caption = "Median of Numerical Variables for each Cluster",
+      linesep = "") %>%
+  kable_styling(font_size = 6, latex_options = c("striped","hold_position"))
+
+```
+
+
+# Suggestions 
+
+Though the above results are only for 10000 randomly sampled customers, we
+can assign a new customer to the cluster with the nearest medoid.
+
+Given that customers in Cluster 2 had a far larger leaving rate (low-loyalty) and
+their detected characteristics, 
+I made the following suggestions.
+
+1. For customers in Cluster 2 with relatively longer monthly calls, we could recommend them to switch the phone plan with unlimited voice if they did not have. 
+2. For customers in Cluster 2, we could offer them some promoted plans with a rented phone, or promoted plans for a work phone, or periodically send them discounts in order to retain them.
+
+# Reference
+
+[Clustering mixed data types in R](http://dpmartin42.github.io/posts/r/cluster-mixed-types) | Daniel P. Martin | 2016
